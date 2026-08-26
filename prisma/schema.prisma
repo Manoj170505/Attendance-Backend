@@ -1,0 +1,84 @@
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Company {
+  id             String          @id @default(auto()) @map("_id") @db.ObjectId
+  name           String
+  code           String          @unique
+  description    String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  devices        Device[]
+  employees      Employee[]
+  attendanceLogs AttendanceLog[]
+
+  @@map("companies")
+}
+
+model Device {
+  id             String          @id @default(auto()) @map("_id") @db.ObjectId
+  serialNumber   String          @unique
+  name           String
+  companyId      String?         @db.ObjectId
+  company        Company?        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  ipAddress      String?
+  model          String?         @default("BioMax/eSSL ADMS")
+  lastHeartbeat  DateTime?
+  status         String          @default("OFFLINE") // ONLINE, OFFLINE, UNASSIGNED
+  firmware       String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  attendanceLogs AttendanceLog[]
+
+  @@index([companyId])
+  @@map("devices")
+}
+
+model Employee {
+  id             String          @id @default(auto()) @map("_id") @db.ObjectId
+  companyId      String          @db.ObjectId
+  company        Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employeeId     String          // Device User ID (e.g. "1001", "1", "EMP-01")
+  name           String
+  department     String?         @default("General")
+  designation    String?         @default("Staff")
+  cardNo         String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  attendanceLogs AttendanceLog[]
+
+  @@unique([companyId, employeeId])
+  @@index([companyId])
+  @@map("employees")
+}
+
+model AttendanceLog {
+  id             String          @id @default(auto()) @map("_id") @db.ObjectId
+  companyId      String          @db.ObjectId
+  company        Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employeeId     String          // Device user ID / Employee ID string
+  deviceSerial   String          // Serial number of the punch device
+  deviceId       String?         @db.ObjectId
+  device         Device?         @relation(fields: [deviceId], references: [id])
+  employeeDbId   String?         @db.ObjectId
+  employee       Employee?       @relation(fields: [employeeDbId], references: [id])
+  timestamp      DateTime
+  state          String          // "CHECK_IN", "CHECK_OUT", "0", "1", "255", etc.
+  punchType      String?         @default("FINGERPRINT") // FINGERPRINT, FACE, CARD, PASSWORD, UNKNOWN
+  rawData        String?         // Full original raw ADMS payload line for audit trail
+  createdAt      DateTime        @default(now())
+
+  @@index([companyId, timestamp])
+  @@index([companyId, employeeId])
+  @@index([deviceSerial])
+  @@map("attendance_logs")
+}
