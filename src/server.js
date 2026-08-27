@@ -14,40 +14,46 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Enable CORS for frontend dashboard
+// Enable CORS for frontend dashboard and external API clients
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-company-id', 'x-serial-number']
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-company-id', 'x-serial-number', 'sn', 'x-forwarded-for']
 }));
 
-// Logger middleware
+// Morgan HTTP request logging (standard Apache combined in prod, colorized dev in local)
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
-// BioMax / eSSL ADMS devices send plain text, form-urlencoded or octet-stream data.
-// We configure body parsers to handle all possible formats:
-app.use(express.text({ type: ['text/plain', 'text/html', 'application/octet-stream', 'application/x-www-form-urlencoded'], limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-app.use(express.json({ limit: '10mb' }));
+// Universal Body Parsers:
+// BioMax, eSSL, and ZKTeco ADMS devices transmit data with varying Content-Types
+// (text/plain, application/octet-stream, application/x-www-form-urlencoded, or missing Content-Type headers).
+// We enable text parser for all text/binary device streams, while retaining JSON and urlencoded for REST APIs.
+app.use(express.text({
+  type: ['text/*', 'application/octet-stream', 'application/x-www-form-urlencoded'],
+  limit: '25mb'
+}));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+app.use(express.json({ limit: '25mb' }));
 
-// Health check endpoint
+// Health check endpoint for Railway, AWS, and uptime monitoring
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    service: 'BioMax / eSSL Multi-Tenant Cloud Attendance Engine'
+    service: 'BioMax / eSSL / ZKTeco Multi-Tenant ADMS Cloud Engine',
+    port: PORT,
+    environment: process.env.NODE_ENV || 'development'
   });
 });
 
-// ADMS Protocol Routes
-// BioMax & eSSL firmware devices connect to either:
-// 1. /iclock/* (Standard default)
-// 2. /* (Root level e.g. /cdata, /getrequest, /registry, /push, /fdata)
-// 3. /api/adms/*
+// ADMS Protocol Routes:
+// Biometric firmware communicates via:
+// 1. /iclock/* (Standard default for BioMax & eSSL)
+// 2. /api/adms/* (Proxy/Gateway standard)
 app.use('/iclock', admsRoutes);
 app.use('/api/adms', admsRoutes);
 
-// Root level aliases for direct device connections
+// Root-level aliases for devices with non-standard base paths (e.g. /cdata, /getrequest, /fdata, /push, /ping)
 app.use(['/cdata', '/getrequest', '/devicecmd', '/fdata', '/registry', '/push', '/ping'], (req, res, next) => {
   const originalPath = req.baseUrl || req.path;
   req.url = originalPath + (req.url === '/' ? '' : req.url);
@@ -60,19 +66,24 @@ app.use('/api/devices', deviceRoutes);
 app.use('/api/employees', employeeRoutes);
 app.use('/api/attendance', attendanceRoutes);
 
-// 404 handler for unexpected routes
+// Catch-all 404 handler
 app.use((req, res) => {
-  // If it's a device ping, return 'OK' so biometric device doesn't hang
+  // If it's a device handshake or log ping, always reply 'OK' so the hardware does not hang
+  if (req.path.includes('iclock') || req.path.includes('cdata') || req.path.includes('getrequest')) {
+    console.log(`[ADMS 404 Intercept] Fallback 'OK' returned for path: ${req.method} ${req.originalUrl}`);
+    res.set('Content-Type', 'text/plain');
+    return res.status(200).send('OK');
+  }
+  res.status(404).json({ success: false, error: `Route ${req.method} ${req.originalUrl} not found` });
+});
+
+// Global error handling middleware
+app.use((err, req, res, next) => {
+  console.error('[Server Fatal Error]', err);
   if (req.path.includes('iclock') || req.path.includes('cdata')) {
     res.set('Content-Type', 'text/plain');
     return res.status(200).send('OK');
   }
-  res.status(404).json({ success: false, error: `Route ${req.method} ${req.url} not found` });
-});
-
-// Global error handler
-app.use((err, req, res, next) => {
-  console.error('[Server Error]', err);
   res.status(500).json({
     success: false,
     error: err.message || 'Internal Server Error'
@@ -80,11 +91,13 @@ app.use((err, req, res, next) => {
 });
 
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log('====================================================');
-  console.log(`🚀 BioMax/eSSL ADMS Attendance Server running on port ${PORT}`);
-  console.log(`📡 ADMS Endpoint: http://localhost:${PORT}/iclock/cdata`);
-  console.log(`📊 Dashboard API: http://localhost:${PORT}/api/attendance/logs`);
-  console.log('====================================================');
+  console.log('================================================================');
+  console.log(`🚀 BioMax / eSSL / ZKTeco ADMS Cloud Server running on port ${PORT}`);
+  console.log(`📡 ADMS Handshake Endpoint: /iclock/cdata`);
+  console.log(`📡 ADMS Polling Endpoint:   /iclock/getrequest`);
+  console.log(`📊 Dashboard Health Check:  /health`);
+  console.log(`📊 Dashboard API:           /api/attendance/logs`);
+  console.log('================================================================');
 });
 
 export default app;
