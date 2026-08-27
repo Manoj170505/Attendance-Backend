@@ -72,15 +72,17 @@ export const handleCDataGet = async (req, res) => {
     }
 
     // Standard ZKTeco / BioMax / eSSL ADMS handshake response configuration.
-    // Firmware parses these line-separated key-value pairs to set polling frequency and transfer modes.
+    // Setting Stamp=0 & ATTLOGStamp=0 commands the device to flush all stored punches immediately.
     const responseConfig = [
       `GET OPTION FROM: ${serialNumber}`,
-      `Stamp=9999`,
-      `OpStamp=9999`,
-      `PhotoStamp=9999`,
+      `Stamp=0`,
+      `OpStamp=0`,
+      `PhotoStamp=0`,
+      `ATTLOGStamp=0`,
+      `OPERLOGStamp=0`,
+      `BIODATAStamp=0`,
       `ErrorDelay=60`,
-      `Delay=30`,
-      `TransTimes=00:00;14:00`,
+      `Delay=10`,
       `TransInterval=1`,
       `TransFlag=1111000000`,
       `TimeZone=330`,
