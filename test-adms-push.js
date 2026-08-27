@@ -5,7 +5,7 @@
  * 2. Punch Logs (POST /iclock/cdata?SN=BMX-10928374&table=ATTLOG)
  */
 
-const BASE_URL = process.env.BASE_URL || 'http://localhost:5000';
+const BASE_URL = process.env.BASE_URL || 'https://attendance-backend-production-48ca.up.railway.app';
 const DEVICE_SN = 'BMX-10928374';
 
 async function testAdmsFlow() {

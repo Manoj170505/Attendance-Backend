@@ -40,16 +40,19 @@ app.get('/health', (req, res) => {
 });
 
 // ADMS Protocol Routes
-// BioMax & eSSL firmware devices connect to:
-// 1. /iclock/cdata and /iclock/getrequest
-// 2. /cdata and /getrequest
+// BioMax & eSSL firmware devices connect to either:
+// 1. /iclock/* (Standard default)
+// 2. /* (Root level e.g. /cdata, /getrequest, /registry, /push, /fdata)
 // 3. /api/adms/*
 app.use('/iclock', admsRoutes);
-app.use('/cdata', (req, res, next) => {
-  req.url = '/cdata' + (req.url === '/' ? '' : req.url);
+app.use('/api/adms', admsRoutes);
+
+// Root level aliases for direct device connections
+app.use(['/cdata', '/getrequest', '/devicecmd', '/fdata', '/registry', '/push', '/ping'], (req, res, next) => {
+  const originalPath = req.baseUrl || req.path;
+  req.url = originalPath + (req.url === '/' ? '' : req.url);
   admsRoutes(req, res, next);
 });
-app.use('/api/adms', admsRoutes);
 
 // Dashboard REST APIs
 app.use('/api/companies', companyRoutes);

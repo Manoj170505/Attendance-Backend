@@ -22,8 +22,8 @@ export const getDevices = async (req, res) => {
       }
     });
 
-    // Check online status based on last heartbeat (e.g. within last 3 minutes)
-    const thresholdMinutes = 3;
+    // Check online status based on last heartbeat (e.g. within last 10 minutes)
+    const thresholdMinutes = 10;
     const now = new Date();
 
     const formatted = devices.map(d => {

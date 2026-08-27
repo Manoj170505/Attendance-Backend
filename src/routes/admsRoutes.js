@@ -9,11 +9,15 @@ import {
 
 const router = express.Router();
 
-// BioMax / eSSL ADMS standard push endpoints
+// BioMax / eSSL / ZKTeco ADMS standard push endpoints
 router.get('/cdata', handleCDataGet);
 router.post('/cdata', handleCDataPost);
-router.get('/getrequest', handleGetRequest);
-router.post('/devicecmd', handleDeviceCmd);
+router.all('/getrequest', handleGetRequest);
+router.all('/devicecmd', handleDeviceCmd);
+router.all('/fdata', handleCDataGet);
+router.all('/registry', handleCDataGet);
+router.all('/push', handleCDataPost);
+router.all('/ping', handleCDataGet);
 
 // Simulator API for developers and dashboard demo
 router.post('/simulate', simulatePush);

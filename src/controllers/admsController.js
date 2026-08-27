@@ -6,17 +6,44 @@ import { parseAdmsPayload } from '../utils/admsParser.js';
  */
 
 /**
+ * Helper to extract Device Serial Number from query, headers, body, or raw text
+ */
+export const extractDeviceSN = (req) => {
+  // 1. Check all possible query param casings
+  const querySN = req.query.SN || req.query.sn || req.query.SerialNumber || req.query.serialno || req.query.deviceId || req.query.sn_id;
+  if (querySN) return String(querySN).trim();
+
+  // 2. Check headers
+  const headerSN = req.headers['x-serial-number'] || req.headers['sn'] || req.headers['serialnumber'] || req.headers['device-sn'];
+  if (headerSN) return String(headerSN).trim();
+
+  // 3. Check JSON / object body
+  if (req.body && typeof req.body === 'object') {
+    const bodySN = req.body.SN || req.body.sn || req.body.SerialNumber || req.body.serialNumber;
+    if (bodySN) return String(bodySN).trim();
+  }
+
+  // 4. Check string body for SN=... or ~SerialNumber=...
+  if (typeof req.body === 'string') {
+    const match = req.body.match(/(?:SN|sn|SerialNumber|~SerialNumber)=([^\s&,\r\n]+)/i);
+    if (match && match[1]) return match[1].trim();
+  }
+
+  return 'UNKNOWN';
+};
+
+/**
  * GET /iclock/cdata or /cdata
  * Handshake / initialization request from biometric machine
  */
 export const handleCDataGet = async (req, res) => {
   try {
-    const serialNumber = req.query.SN || req.headers['x-serial-number'] || 'UNKNOWN';
+    const serialNumber = extractDeviceSN(req);
     const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
     console.log(`[ADMS GET] Handshake ping from Device SN: ${serialNumber} (IP: ${clientIp})`);
 
-    if (serialNumber !== 'UNKNOWN') {
+    if (serialNumber && serialNumber !== 'UNKNOWN') {
       // Find or create device to track connection
       await prisma.device.upsert({
         where: { serialNumber },
@@ -27,7 +54,7 @@ export const handleCDataGet = async (req, res) => {
         },
         create: {
           serialNumber,
-          name: `BioMax Device (${serialNumber})`,
+          name: `BioMax Terminal (${serialNumber})`,
           status: 'ONLINE',
           ipAddress: clientIp,
           model: 'BioMax / eSSL ADMS'
@@ -35,7 +62,7 @@ export const handleCDataGet = async (req, res) => {
       });
     }
 
-    // Standard ADMS / iClock handshake response format expected by firmware
+    // Standard ADMS / iClock handshake response format expected by BioMax & eSSL firmware
     const responseConfig = [
       `GET OPTION FROM: ${serialNumber}`,
       `Stamp=9999`,
@@ -46,8 +73,12 @@ export const handleCDataGet = async (req, res) => {
       `TransTimes=00:00;14:00`,
       `TransInterval=1`,
       `TransFlag=1111000000`,
+      `TimeZone=330`,
       `Realtime=1`,
-      `Encrypt=0`
+      `Encrypt=0`,
+      `ServerVersion=3.4.1`,
+      `PushProtVer=2.4.1`,
+      `PushOptionsFlag=1`
     ].join('\n');
 
     res.set('Content-Type', 'text/plain');
@@ -65,15 +96,15 @@ export const handleCDataGet = async (req, res) => {
  */
 export const handleCDataPost = async (req, res) => {
   try {
-    const serialNumber = req.query.SN || req.headers['x-serial-number'];
-    const table = req.query.table || 'ATTLOG';
+    const serialNumber = extractDeviceSN(req);
+    const table = req.query.table || req.query.TableName || 'ATTLOG';
     const rawBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
     const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
-    console.log(`[ADMS POST] Received ${table} push from SN: ${serialNumber || 'UNKNOWN'}`);
+    console.log(`[ADMS POST] Received ${table} push from SN: ${serialNumber}`);
     console.log(`[ADMS POST Body]`, rawBody);
 
-    if (!serialNumber) {
+    if (!serialNumber || serialNumber === 'UNKNOWN') {
       console.warn('[ADMS POST] Missing Serial Number in request');
       res.set('Content-Type', 'text/plain');
       return res.status(200).send('OK');
@@ -90,7 +121,7 @@ export const handleCDataPost = async (req, res) => {
       device = await prisma.device.create({
         data: {
           serialNumber,
-          name: `Unassigned Device (${serialNumber})`,
+          name: `Unassigned Terminal (${serialNumber})`,
           status: 'ONLINE',
           ipAddress: clientIp,
           lastHeartbeat: new Date()
@@ -178,13 +209,31 @@ export const handleCDataPost = async (req, res) => {
  * Device polling for pending commands
  */
 export const handleGetRequest = async (req, res) => {
-  const serialNumber = req.query.SN || req.headers['x-serial-number'];
-  if (serialNumber) {
-    prisma.device.updateMany({
-      where: { serialNumber },
-      data: { lastHeartbeat: new Date(), status: 'ONLINE' }
-    }).catch(() => {});
+  try {
+    const serialNumber = extractDeviceSN(req);
+    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+
+    if (serialNumber && serialNumber !== 'UNKNOWN') {
+      await prisma.device.upsert({
+        where: { serialNumber },
+        update: {
+          lastHeartbeat: new Date(),
+          status: 'ONLINE',
+          ipAddress: clientIp
+        },
+        create: {
+          serialNumber,
+          name: `BioMax Terminal (${serialNumber})`,
+          status: 'ONLINE',
+          ipAddress: clientIp,
+          model: 'BioMax / eSSL ADMS'
+        }
+      });
+    }
+  } catch (err) {
+    console.error('[handleGetRequest Error]', err);
   }
+
   res.set('Content-Type', 'text/plain');
   return res.status(200).send('OK');
 };
