@@ -152,3 +152,102 @@ export const getAttendanceStats = async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 };
+
+/**
+ * Direct REST API for Local Sync Agents / Hardware Bridges
+ * POST /api/attendance/punch
+ */
+export const recordPunch = async (req, res) => {
+  try {
+    const { deviceSerial, employeeId, timestamp, state, punchType, rawData } = req.body;
+
+    if (!deviceSerial || !employeeId) {
+      return res.status(400).json({ success: false, error: 'deviceSerial and employeeId are required' });
+    }
+
+    // Lookup or auto-register device
+    let device = await prisma.device.findUnique({
+      where: { serialNumber: deviceSerial },
+      include: { company: true }
+    });
+
+    if (!device) {
+      device = await prisma.device.create({
+        data: {
+          serialNumber: deviceSerial,
+          name: `Terminal (${deviceSerial})`,
+          status: 'ONLINE',
+          lastHeartbeat: new Date()
+        }
+      });
+    } else {
+      await prisma.device.update({
+        where: { id: device.id },
+        data: {
+          status: 'ONLINE',
+          lastHeartbeat: new Date()
+        }
+      });
+    }
+
+    if (!device.companyId) {
+      return res.status(200).json({
+        success: true,
+        message: `Punch received for device ${deviceSerial} but device is unassigned to a company.`
+      });
+    }
+
+    // Upsert Employee
+    let employee = await prisma.employee.findUnique({
+      where: {
+        companyId_employeeId: {
+          companyId: device.companyId,
+          employeeId: String(employeeId)
+        }
+      }
+    });
+
+    if (!employee) {
+      employee = await prisma.employee.create({
+        data: {
+          companyId: device.companyId,
+          employeeId: String(employeeId),
+          name: `Employee #${employeeId}`,
+          department: 'General',
+          designation: 'Staff'
+        }
+      });
+    }
+
+    // Create Attendance Log
+    const log = await prisma.attendanceLog.create({
+      data: {
+        companyId: device.companyId,
+        employeeId: String(employeeId),
+        deviceSerial,
+        deviceId: device.id,
+        employeeDbId: employee.id,
+        timestamp: timestamp ? new Date(timestamp) : new Date(),
+        state: state || 'CHECK_IN',
+        punchType: punchType || 'FINGERPRINT',
+        rawData: rawData || `AGENT: ${employeeId}\t${new Date().toISOString()}\t${state || 'CHECK_IN'}`
+      },
+      include: {
+        employee: true,
+        company: true,
+        device: true
+      }
+    });
+
+    console.log(`📡 [AGENT REST PUNCH] Employee #${employeeId} punched at Device [${deviceSerial}] (Company: ${device.company?.name})`);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Punch recorded successfully',
+      data: log
+    });
+  } catch (error) {
+    console.error('[recordPunch Error]', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
