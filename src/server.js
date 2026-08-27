@@ -79,12 +79,27 @@ app.use((err, req, res, next) => {
   });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('====================================================');
   console.log(`🚀 BioMax/eSSL ADMS Attendance Server running on port ${PORT}`);
   console.log(`📡 ADMS Endpoint: http://localhost:${PORT}/iclock/cdata`);
   console.log(`📊 Dashboard API: http://localhost:${PORT}/api/attendance/logs`);
   console.log('====================================================');
 });
+
+// If running locally on development and Port is not 80, also bind port 80 for BioMax hardware
+if (Number(PORT) !== 80) {
+  import('http').then(http => {
+    try {
+      const port80Server = http.createServer(app);
+      port80Server.listen(80, '0.0.0.0', () => {
+        console.log(`🌐 Also listening on default HTTP Port 80 for BioMax direct connection!`);
+      }).on('error', (err) => {
+        // Port 80 might require admin privileges on some systems, continue on primary port
+        console.log(`ℹ️ Port 80 listener note: ${err.message} (Using primary port ${PORT})`);
+      });
+    } catch (e) {}
+  });
+}
 
 export default app;
