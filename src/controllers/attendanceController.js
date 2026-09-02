@@ -251,3 +251,109 @@ export const recordPunch = async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 };
+
+/**
+ * Sync Enrolled Users & Names from Biometric Hardware
+ * POST /api/attendance/sync-users
+ */
+export const syncDeviceUsers = async (req, res) => {
+  try {
+    const { deviceSerial, users } = req.body;
+
+    if (!deviceSerial || !Array.isArray(users)) {
+      return res.status(400).json({ success: false, error: 'deviceSerial and users array are required' });
+    }
+
+    // Lookup device
+    let device = await prisma.device.findUnique({
+      where: { serialNumber: deviceSerial },
+      include: { company: true }
+    });
+
+    if (!device) {
+      device = await prisma.device.create({
+        data: {
+          serialNumber: deviceSerial,
+          name: `Terminal (${deviceSerial})`,
+          status: 'ONLINE',
+          lastHeartbeat: new Date()
+        }
+      });
+    } else {
+      await prisma.device.update({
+        where: { id: device.id },
+        data: {
+          status: 'ONLINE',
+          lastHeartbeat: new Date()
+        }
+      });
+    }
+
+    if (!device.companyId) {
+      return res.status(200).json({
+        success: true,
+        message: `Device ${deviceSerial} is currently unassigned to a company. Users queued until assigned.`
+      });
+    }
+
+    let syncedCount = 0;
+
+    for (const u of users) {
+      const cleanEmpId = String(u.employeeId || u.userId || u.uid || '').trim();
+      if (!cleanEmpId) continue;
+
+      let cleanName = u.name ? String(u.name).replace(/\0/g, '').trim() : '';
+      if (!cleanName) {
+        cleanName = `Employee #${cleanEmpId}`;
+      }
+
+      const cardNo = u.cardNo || u.cardno ? String(u.cardNo || u.cardno).trim() : null;
+
+      const existing = await prisma.employee.findUnique({
+        where: {
+          companyId_employeeId: {
+            companyId: device.companyId,
+            employeeId: cleanEmpId
+          }
+        }
+      });
+
+      if (existing) {
+        // Update name if current is placeholder or if machine has a valid custom name
+        const shouldUpdateName = !cleanName.startsWith('Employee #') || existing.name.startsWith('Employee #');
+        await prisma.employee.update({
+          where: { id: existing.id },
+          data: {
+            ...(shouldUpdateName ? { name: cleanName } : {}),
+            ...(cardNo && cardNo !== '0' ? { cardNo } : {})
+          }
+        });
+      } else {
+        await prisma.employee.create({
+          data: {
+            companyId: device.companyId,
+            employeeId: cleanEmpId,
+            name: cleanName,
+            department: 'Operations',
+            designation: 'Staff',
+            cardNo: cardNo && cardNo !== '0' ? cardNo : null
+          }
+        });
+      }
+
+      syncedCount++;
+    }
+
+    console.log(`👥 [USER SYNC] Synced ${syncedCount} enrolled employee profiles from Device [${deviceSerial}]`);
+
+    return res.status(200).json({
+      success: true,
+      count: syncedCount,
+      message: `Successfully synced ${syncedCount} user profiles from device ${deviceSerial}`
+    });
+  } catch (error) {
+    console.error('[syncDeviceUsers Error]', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+

@@ -25,11 +25,10 @@ app.use(cors({
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // Universal Body Parsers:
-// BioMax, eSSL, and ZKTeco ADMS devices transmit data with varying Content-Types
-// (text/plain, application/octet-stream, application/x-www-form-urlencoded, or missing Content-Type headers).
-// We enable text parser for all text/binary device streams, while retaining JSON and urlencoded for REST APIs.
+// Restricted express.text to text/* and octet-stream so URL-encoded form data 
+// passes cleanly to express.urlencoded for regular dashboard REST APIs.
 app.use(express.text({
-  type: ['text/*', 'application/octet-stream', 'application/x-www-form-urlencoded'],
+  type: ['text/*', 'application/octet-stream'],
   limit: '25mb'
 }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
@@ -47,18 +46,17 @@ app.get('/health', (req, res) => {
 });
 
 // ADMS Protocol Routes:
-// Biometric firmware communicates via:
-// 1. /iclock/* (Standard default for BioMax & eSSL)
-// 2. /api/adms/* (Proxy/Gateway standard)
 app.use('/iclock', admsRoutes);
 app.use('/api/adms', admsRoutes);
 
-// Root-level aliases for devices with non-standard base paths (e.g. /cdata, /getrequest, /fdata, /push, /ping)
-app.use(['/cdata', '/getrequest', '/devicecmd', '/fdata', '/registry', '/push', '/ping'], (req, res, next) => {
-  const originalPath = req.baseUrl || req.path;
-  req.url = originalPath + (req.url === '/' ? '' : req.url);
-  admsRoutes(req, res, next);
-});
+// Direct root-level aliases preventing double-path concatenation bugs
+app.use('/cdata', admsRoutes);
+app.use('/getrequest', admsRoutes);
+app.use('/devicecmd', admsRoutes);
+app.use('/fdata', admsRoutes);
+app.use('/registry', admsRoutes);
+app.use('/push', admsRoutes);
+app.use('/ping', admsRoutes);
 
 // Dashboard REST APIs
 app.use('/api/companies', companyRoutes);
@@ -68,7 +66,6 @@ app.use('/api/attendance', attendanceRoutes);
 
 // Catch-all 404 handler
 app.use((req, res) => {
-  // If it's a device handshake or log ping, always reply 'OK' so the hardware does not hang
   if (req.path.includes('iclock') || req.path.includes('cdata') || req.path.includes('getrequest')) {
     console.log(`[ADMS 404 Intercept] Fallback 'OK' returned for path: ${req.method} ${req.originalUrl}`);
     res.set('Content-Type', 'text/plain');
