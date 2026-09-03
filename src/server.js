@@ -34,7 +34,8 @@ app.use(express.text({
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use(express.json({ limit: '25mb' }));
 
-// Health check endpoint for Railway, AWS, and uptime monitoring
+// Health check endpoint for Railway,
+//  AWS, and uptime monitoring
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'healthy',
