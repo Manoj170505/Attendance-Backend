@@ -219,6 +219,37 @@ export const recordPunch = async (req, res) => {
       });
     }
 
+    // Validate Timestamp
+    const punchDate = timestamp ? new Date(timestamp) : new Date();
+    if (isNaN(punchDate.getTime())) {
+      return res.status(400).json({ success: false, error: 'Invalid timestamp provided' });
+    }
+
+    // Deduplication check: prevent duplicate punch within 30 seconds for same employee on same device
+    const windowStart = new Date(punchDate.getTime() - 30 * 1000);
+    const windowEnd = new Date(punchDate.getTime() + 30 * 1000);
+
+    const existingPunch = await prisma.attendanceLog.findFirst({
+      where: {
+        companyId: device.companyId,
+        employeeId: String(employeeId),
+        deviceSerial,
+        timestamp: {
+          gte: windowStart,
+          lte: windowEnd
+        }
+      }
+    });
+
+    if (existingPunch) {
+      return res.status(200).json({
+        success: true,
+        isDuplicate: true,
+        message: 'Duplicate punch ignored (already recorded within time window)',
+        data: existingPunch
+      });
+    }
+
     // Create Attendance Log
     const log = await prisma.attendanceLog.create({
       data: {
@@ -227,10 +258,10 @@ export const recordPunch = async (req, res) => {
         deviceSerial,
         deviceId: device.id,
         employeeDbId: employee.id,
-        timestamp: timestamp ? new Date(timestamp) : new Date(),
+        timestamp: punchDate,
         state: state || 'CHECK_IN',
         punchType: punchType || 'FINGERPRINT',
-        rawData: rawData || `AGENT: ${employeeId}\t${new Date().toISOString()}\t${state || 'CHECK_IN'}`
+        rawData: rawData || `AGENT: ${employeeId}\t${punchDate.toISOString()}\t${state || 'CHECK_IN'}`
       },
       include: {
         employee: true,
@@ -239,7 +270,7 @@ export const recordPunch = async (req, res) => {
       }
     });
 
-    console.log(`📡 [AGENT REST PUNCH] Employee #${employeeId} punched at Device [${deviceSerial}] (Company: ${device.company?.name})`);
+    console.log(`📡 [AGENT REST PUNCH] Employee #${employeeId} punched at Device [${deviceSerial}] (${state || 'CHECK_IN'}) - Company: ${device.company?.name}`);
 
     return res.status(201).json({
       success: true,
