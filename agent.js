@@ -104,40 +104,59 @@ try {
     });
   };
 
+  function parseZKTimeToDate(time) {
+    if (!time || typeof time !== 'number' || isNaN(time) || time <= 0) return null;
+    try {
+      const second = time % 60;
+      time = Math.floor(time / 60);
+      const minute = time % 60;
+      time = Math.floor(time / 60);
+      const hour = time % 24;
+      time = Math.floor(time / 24);
+      const day = (time % 31) + 1;
+      time = Math.floor(time / 31);
+      const month = time % 12;
+      time = Math.floor(time / 12);
+      const year = time + 2000;
+      
+      const d = new Date(year, month, day, hour, minute, second);
+      return isNaN(d.getTime()) || year < 2020 ? null : d;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function customDecodeRecordData40(recordData) {
-    const b26 = recordData.length > 26 ? recordData.readUInt8(26) : 1;
-    const b27 = recordData.length > 27 ? recordData.readUInt8(27) : 0;
-    const b30 = recordData.length > 30 ? recordData.readUInt8(30) : 0;
+    const userSn = recordData.readUIntLE(0, 2);
+    const deviceUserId = recordData.slice(2, 26).toString('ascii').split('\0').shift().trim();
+    const verifyType = recordData.length > 26 ? recordData.readUInt8(26) : 1;
+    
+    const timeVal = recordData.length >= 31 ? recordData.readUInt32LE(27) : 0;
+    const recordTime = parseZKTimeToDate(timeVal);
+
+    // Punch state: Byte 31 on BioMax/eSSL/ZKTeco (0=Check In, 1=Check Out, 2=Break Out, 3=Break In, 4=OT In, 5=OT Out)
     const b31 = recordData.length > 31 ? recordData.readUInt8(31) : 0;
     const b32 = recordData.length > 32 ? recordData.readUInt8(32) : 0;
-
+    
     let detectedState = 0;
-    if (b31 >= 1 && b31 <= 5) {
+    if (b31 >= 0 && b31 <= 5) {
       detectedState = b31;
-    } else if (b30 >= 1 && b30 <= 5) {
-      detectedState = b30;
-    } else if (b32 >= 1 && b32 <= 5) {
+    } else if (b32 >= 0 && b32 <= 5) {
       detectedState = b32;
-    } else if (b27 >= 1 && b27 <= 5) {
-      detectedState = b27;
     }
 
-    const { parseTimeToDate } = require('node-zklib/utils');
-    const deviceUserId = recordData.slice(2, 26).toString('ascii').split('\0').shift().trim();
-    const timeVal = recordData.readUInt32LE(27);
-    const recordTime = parseTimeToDate ? parseTimeToDate(timeVal) : new Date();
+    const workCode = recordData.length >= 36 ? recordData.readUInt32LE(32) : 0;
 
     return {
-      userSn: recordData.readUIntLE(0, 2),
+      userSn,
       deviceUserId,
-      verifyType: b26,
+      verifyType,
       recordTime,
       recordType: detectedState,
       status: detectedState,
       state: detectedState,
-      workCode: recordData.length >= 36 ? recordData.readUInt32LE(32) : 0,
-      rawHex: recordData.toString('hex'),
-      debugBytes: `B26:${b26} B27:${b27} B30:${b30} B31:${b31} B32:${b32}`
+      workCode,
+      rawHex: recordData.toString('hex')
     };
   }
 
@@ -160,7 +179,9 @@ try {
     let records = [];
     while (recordData.length >= RECORD_PACKET_SIZE) {
       const record = customDecodeRecordData40(recordData.subarray(0, RECORD_PACKET_SIZE));
-      records.push({ ...record, ip: this.ip });
+      if (record && record.recordTime && record.deviceUserId) {
+        records.push({ ...record, ip: this.ip });
+      }
       recordData = recordData.subarray(RECORD_PACKET_SIZE);
     }
     return { data: records, err: data.err };
