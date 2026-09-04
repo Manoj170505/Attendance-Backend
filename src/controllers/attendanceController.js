@@ -1,28 +1,9 @@
 import prisma from '../config/prisma.js';
-import path from 'path';
-import fs from 'fs';
-
-/**
- * Helper to ensure a default company exists so punches and devices are never blocked
- */
-export async function getOrCreateDefaultCompany() {
-  let company = await prisma.company.findFirst();
-  if (!company) {
-    company = await prisma.company.create({
-      data: {
-        name: 'Primary Organization',
-        code: 'PRIMARY-ORG',
-        description: 'Auto-provisioned default organization'
-      }
-    });
-    console.log(`🏢 [AUTO-PROVISION] Created default company: ${company.name} (${company.code})`);
-  }
-  return company;
-}
 
 /**
  * Controller for Attendance Logs & Analytics
  */
+
 export const getAttendanceLogs = async (req, res) => {
   try {
     const {
@@ -60,6 +41,7 @@ export const getAttendanceLogs = async (req, res) => {
         where.timestamp.gte = new Date(startDate);
       }
       if (endDate) {
+        // Set end of day if only date is passed
         const end = new Date(endDate);
         if (endDate.length <= 10) {
           end.setHours(23, 59, 59, 999);
@@ -117,6 +99,7 @@ export const getAttendanceStats = async (req, res) => {
       where.companyId = companyId;
     }
 
+    // Calculate today's start and end timestamps in UTC/local
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
 
@@ -171,30 +154,6 @@ export const getAttendanceStats = async (req, res) => {
 };
 
 /**
- * Get latest recorded punch timestamp for a device serial
- * Used by sync agents to perform cursor-based incremental sync
- * GET /api/attendance/latest-timestamp
- */
-export const getLatestPunchTimestamp = async (req, res) => {
-  try {
-    const { deviceSerial } = req.query;
-    const where = deviceSerial ? { deviceSerial } : {};
-    const latestLog = await prisma.attendanceLog.findFirst({
-      where,
-      orderBy: { timestamp: 'desc' }
-    });
-
-    return res.status(200).json({
-      success: true,
-      latestTimestamp: latestLog ? latestLog.timestamp.toISOString() : null
-    });
-  } catch (error) {
-    console.error('[getLatestPunchTimestamp Error]', error);
-    return res.status(500).json({ success: false, error: error.message });
-  }
-};
-
-/**
  * Direct REST API for Local Sync Agents / Hardware Bridges
  * POST /api/attendance/punch
  */
@@ -205,8 +164,6 @@ export const recordPunch = async (req, res) => {
     if (!deviceSerial || !employeeId) {
       return res.status(400).json({ success: false, error: 'deviceSerial and employeeId are required' });
     }
-
-    const defaultCompany = await getOrCreateDefaultCompany();
 
     // Lookup or auto-register device
     let device = await prisma.device.findUnique({
@@ -219,59 +176,32 @@ export const recordPunch = async (req, res) => {
         data: {
           serialNumber: deviceSerial,
           name: `Terminal (${deviceSerial})`,
-          companyId: defaultCompany.id,
           status: 'ONLINE',
           lastHeartbeat: new Date()
-        },
-        include: { company: true }
+        }
       });
     } else {
-      const updateData = {
-        status: 'ONLINE',
-        lastHeartbeat: new Date()
-      };
-      if (!device.companyId) {
-        updateData.companyId = defaultCompany.id;
-      }
-      device = await prisma.device.update({
+      await prisma.device.update({
         where: { id: device.id },
-        data: updateData,
-        include: { company: true }
+        data: {
+          status: 'ONLINE',
+          lastHeartbeat: new Date()
+        }
       });
     }
 
-    const activeCompanyId = device.companyId || defaultCompany.id;
-    const punchDate = timestamp ? new Date(timestamp) : new Date();
-
-    // 1. DEDUPLICATION: Check if this identical punch was already registered
-    const existingLog = await prisma.attendanceLog.findFirst({
-      where: {
-        companyId: activeCompanyId,
-        deviceSerial,
-        employeeId: String(employeeId),
-        timestamp: punchDate
-      },
-      include: {
-        employee: true,
-        company: true,
-        device: true
-      }
-    });
-
-    if (existingLog) {
+    if (!device.companyId) {
       return res.status(200).json({
         success: true,
-        message: 'Punch already registered (duplicate skipped)',
-        data: existingLog,
-        isDuplicate: true
+        message: `Punch received for device ${deviceSerial} but device is unassigned to a company.`
       });
     }
 
-    // 2. Upsert Employee
+    // Upsert Employee
     let employee = await prisma.employee.findUnique({
       where: {
         companyId_employeeId: {
-          companyId: activeCompanyId,
+          companyId: device.companyId,
           employeeId: String(employeeId)
         }
       }
@@ -280,7 +210,7 @@ export const recordPunch = async (req, res) => {
     if (!employee) {
       employee = await prisma.employee.create({
         data: {
-          companyId: activeCompanyId,
+          companyId: device.companyId,
           employeeId: String(employeeId),
           name: `Employee #${employeeId}`,
           department: 'General',
@@ -289,18 +219,18 @@ export const recordPunch = async (req, res) => {
       });
     }
 
-    // 3. Create Attendance Log
+    // Create Attendance Log
     const log = await prisma.attendanceLog.create({
       data: {
-        companyId: activeCompanyId,
+        companyId: device.companyId,
         employeeId: String(employeeId),
         deviceSerial,
         deviceId: device.id,
         employeeDbId: employee.id,
-        timestamp: punchDate,
+        timestamp: timestamp ? new Date(timestamp) : new Date(),
         state: state || 'CHECK_IN',
         punchType: punchType || 'FINGERPRINT',
-        rawData: rawData || `AGENT: ${employeeId}\t${punchDate.toISOString()}\t${state || 'CHECK_IN'}`
+        rawData: rawData || `AGENT: ${employeeId}\t${new Date().toISOString()}\t${state || 'CHECK_IN'}`
       },
       include: {
         employee: true,
@@ -309,13 +239,12 @@ export const recordPunch = async (req, res) => {
       }
     });
 
-    console.log(`📡 [PUNCH SAVED] Employee #${employeeId} (${state || 'CHECK_IN'}) at Device [${deviceSerial}]`);
+    console.log(`📡 [AGENT REST PUNCH] Employee #${employeeId} punched at Device [${deviceSerial}] (Company: ${device.company?.name})`);
 
     return res.status(201).json({
       success: true,
       message: 'Punch recorded successfully',
-      data: log,
-      isDuplicate: false
+      data: log
     });
   } catch (error) {
     console.error('[recordPunch Error]', error);
@@ -335,8 +264,6 @@ export const syncDeviceUsers = async (req, res) => {
       return res.status(400).json({ success: false, error: 'deviceSerial and users array are required' });
     }
 
-    const defaultCompany = await getOrCreateDefaultCompany();
-
     // Lookup device
     let device = await prisma.device.findUnique({
       where: { serialNumber: deviceSerial },
@@ -348,28 +275,27 @@ export const syncDeviceUsers = async (req, res) => {
         data: {
           serialNumber: deviceSerial,
           name: `Terminal (${deviceSerial})`,
-          companyId: defaultCompany.id,
           status: 'ONLINE',
           lastHeartbeat: new Date()
-        },
-        include: { company: true }
+        }
       });
     } else {
-      const updateData = {
-        status: 'ONLINE',
-        lastHeartbeat: new Date()
-      };
-      if (!device.companyId) {
-        updateData.companyId = defaultCompany.id;
-      }
-      device = await prisma.device.update({
+      await prisma.device.update({
         where: { id: device.id },
-        data: updateData,
-        include: { company: true }
+        data: {
+          status: 'ONLINE',
+          lastHeartbeat: new Date()
+        }
       });
     }
 
-    const activeCompanyId = device.companyId || defaultCompany.id;
+    if (!device.companyId) {
+      return res.status(200).json({
+        success: true,
+        message: `Device ${deviceSerial} is currently unassigned to a company. Users queued until assigned.`
+      });
+    }
+
     let syncedCount = 0;
 
     for (const u of users) {
@@ -386,13 +312,14 @@ export const syncDeviceUsers = async (req, res) => {
       const existing = await prisma.employee.findUnique({
         where: {
           companyId_employeeId: {
-            companyId: activeCompanyId,
+            companyId: device.companyId,
             employeeId: cleanEmpId
           }
         }
       });
 
       if (existing) {
+        // Update name if current is placeholder or if machine has a valid custom name
         const shouldUpdateName = !cleanName.startsWith('Employee #') || existing.name.startsWith('Employee #');
         await prisma.employee.update({
           where: { id: existing.id },
@@ -404,7 +331,7 @@ export const syncDeviceUsers = async (req, res) => {
       } else {
         await prisma.employee.create({
           data: {
-            companyId: activeCompanyId,
+            companyId: device.companyId,
             employeeId: cleanEmpId,
             name: cleanName,
             department: 'Operations',
@@ -430,27 +357,3 @@ export const syncDeviceUsers = async (req, res) => {
   }
 };
 
-/**
- * Direct file download endpoint for agent.js
- * GET /download/agent.js or GET /api/attendance/download-agent
- */
-export const downloadAgentScript = async (req, res) => {
-  try {
-    const searchPaths = [
-      path.join(process.cwd(), 'agent.js'),
-      path.join(process.cwd(), '../agent/agent.js'),
-      path.join(process.cwd(), 'src/agent.js')
-    ];
-
-    for (const p of searchPaths) {
-      if (fs.existsSync(p)) {
-        res.setHeader('Content-Type', 'application/javascript');
-        res.setHeader('Content-Disposition', 'attachment; filename="agent.js"');
-        return res.sendFile(path.resolve(p));
-      }
-    }
-    return res.status(404).send('agent.js file not found on server');
-  } catch (err) {
-    return res.status(500).send(err.message);
-  }
-};

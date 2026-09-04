@@ -65,16 +65,6 @@ app.use('/api/devices', deviceRoutes);
 app.use('/api/employees', employeeRoutes);
 app.use('/api/attendance', attendanceRoutes);
 
-// Direct agent download aliases
-app.get('/download/agent.js', (req, res, next) => {
-  req.url = '/download-agent';
-  attendanceRoutes(req, res, next);
-});
-app.get('/agent.js', (req, res, next) => {
-  req.url = '/download-agent';
-  attendanceRoutes(req, res, next);
-});
-
 // Catch-all 404 handler
 app.use((req, res) => {
   if (req.path.includes('iclock') || req.path.includes('cdata') || req.path.includes('getrequest')) {
