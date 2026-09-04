@@ -103,6 +103,68 @@ try {
         });
     });
   };
+
+  function customDecodeRecordData40(recordData) {
+    const b26 = recordData.length > 26 ? recordData.readUInt8(26) : 1;
+    const b27 = recordData.length > 27 ? recordData.readUInt8(27) : 0;
+    const b30 = recordData.length > 30 ? recordData.readUInt8(30) : 0;
+    const b31 = recordData.length > 31 ? recordData.readUInt8(31) : 0;
+    const b32 = recordData.length > 32 ? recordData.readUInt8(32) : 0;
+
+    let detectedState = 0;
+    if (b31 >= 1 && b31 <= 5) {
+      detectedState = b31;
+    } else if (b30 >= 1 && b30 <= 5) {
+      detectedState = b30;
+    } else if (b32 >= 1 && b32 <= 5) {
+      detectedState = b32;
+    } else if (b27 >= 1 && b27 <= 5) {
+      detectedState = b27;
+    }
+
+    const { parseTimeToDate } = require('node-zklib/utils');
+    const deviceUserId = recordData.slice(2, 26).toString('ascii').split('\0').shift().trim();
+    const timeVal = recordData.readUInt32LE(27);
+    const recordTime = parseTimeToDate ? parseTimeToDate(timeVal) : new Date();
+
+    return {
+      userSn: recordData.readUIntLE(0, 2),
+      deviceUserId,
+      verifyType: b26,
+      recordTime,
+      recordType: detectedState,
+      status: detectedState,
+      state: detectedState,
+      workCode: recordData.length >= 36 ? recordData.readUInt32LE(32) : 0,
+      rawHex: recordData.toString('hex'),
+      debugBytes: `B26:${b26} B27:${b27} B30:${b30} B31:${b31} B32:${b32}`
+    };
+  }
+
+  ZKLibTCP.prototype.getAttendances = async function (callbackInProcess = () => { }) {
+    const { REQUEST_DATA } = require('node-zklib/constants');
+    if (this.socket) {
+      try { await this.freeData(); } catch (err) { return Promise.reject(err); }
+    }
+    let data = null;
+    try {
+      data = await this.readWithBuffer(REQUEST_DATA.GET_ATTENDANCE_LOGS, callbackInProcess);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    if (this.socket) {
+      try { await this.freeData(); } catch (err) { return Promise.reject(err); }
+    }
+    const RECORD_PACKET_SIZE = 40;
+    let recordData = data.data.subarray(4);
+    let records = [];
+    while (recordData.length >= RECORD_PACKET_SIZE) {
+      const record = customDecodeRecordData40(recordData.subarray(0, RECORD_PACKET_SIZE));
+      records.push({ ...record, ip: this.ip });
+      recordData = recordData.subarray(RECORD_PACKET_SIZE);
+    }
+    return { data: records, err: data.err };
+  };
 } catch (patchErr) {
   console.warn('⚠️ Could not apply ZKLibTCP monkey-patch:', patchErr.message);
 }
@@ -299,7 +361,7 @@ async function pushPunchToCloud(record) {
       if (response.data.isDuplicate) {
         return true; // Successfully acknowledged as already processed
       }
-      console.log(`✅ [SYNCED TO CLOUD] Employee PIN: ${employeeId} | ${recordDate.toLocaleTimeString()} | State: ${payload.state} | Type: ${payload.punchType}`);
+      console.log(`✅ [SYNCED TO CLOUD] Employee PIN: ${employeeId} | ${recordDate.toLocaleTimeString()} | State: ${payload.state} | Type: ${payload.punchType} | Packet: [${record.debugBytes || ''}]`);
       return true;
     }
   } catch (err) {
