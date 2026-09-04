@@ -1,5 +1,6 @@
 import prisma from '../config/prisma.js';
 import { parseAdmsPayload } from '../utils/admsParser.js';
+import { getOrCreateDefaultCompany } from './attendanceController.js';
 
 /**
  * Controller for BioMax / eSSL / ZKTeco ADMS (Push) Cloud Protocol
@@ -134,25 +135,34 @@ export const handleCDataPost = async (req, res) => {
       include: { company: true }
     });
 
+    const defaultCompany = await getOrCreateDefaultCompany();
+
     if (!device) {
       device = await prisma.device.create({
         data: {
           serialNumber,
-          name: `Unassigned Terminal (${serialNumber})`,
+          name: `Terminal (${serialNumber})`,
+          companyId: defaultCompany.id,
           status: 'ONLINE',
           ipAddress: String(clientIp),
           lastHeartbeat: new Date()
-        }
+        },
+        include: { company: true }
       });
-      console.log(`🆕 [ADMS Auto-Register] Created new unassigned device [${serialNumber}].`);
+      console.log(`🆕 [ADMS Auto-Register] Created new terminal [${serialNumber}] under ${defaultCompany.name}.`);
     } else {
-      await prisma.device.update({
+      const updateData = {
+        lastHeartbeat: new Date(),
+        status: 'ONLINE',
+        ipAddress: String(clientIp)
+      };
+      if (!device.companyId) {
+        updateData.companyId = defaultCompany.id;
+      }
+      device = await prisma.device.update({
         where: { id: device.id },
-        data: {
-          lastHeartbeat: new Date(),
-          status: 'ONLINE',
-          ipAddress: String(clientIp)
-        }
+        data: updateData,
+        include: { company: true }
       });
     }
 
@@ -163,25 +173,34 @@ export const handleCDataPost = async (req, res) => {
       return res.status(200).send('OK');
     }
 
-    // 3. Multi-tenant verification: check if device is assigned to a company
-    if (!device.companyId) {
-      console.warn(`⚠️ [ADMS Tenant Warning] Device ${serialNumber} is not assigned to any Company. Punches acknowledged but unassigned.`);
-      res.set('Content-Type', 'text/plain');
-      return res.status(200).send('OK: 0');
-    }
+    const activeCompanyId = device.companyId || defaultCompany.id;
 
-    // 4. Parse attendance records using the universal parser
+    // 3. Parse attendance records using the universal parser
     const parsedRecords = parseAdmsPayload(rawBody);
-    console.log(`📊 [ADMS Parsed] Extracted ${parsedRecords.length} punch records for Company: ${device.company?.name || device.companyId}`);
+    console.log(`📊 [ADMS Parsed] Extracted ${parsedRecords.length} punch records for Company: ${device.company?.name || defaultCompany.name}`);
 
     let savedCount = 0;
 
     for (const rec of parsedRecords) {
+      // Deduplicate: check if this record is already saved
+      const existing = await prisma.attendanceLog.findFirst({
+        where: {
+          companyId: activeCompanyId,
+          deviceSerial: serialNumber,
+          employeeId: rec.employeeId,
+          timestamp: rec.timestamp
+        }
+      });
+
+      if (existing) {
+        continue;
+      }
+
       // Find or auto-create Employee under this company tenant
       let employee = await prisma.employee.findUnique({
         where: {
           companyId_employeeId: {
-            companyId: device.companyId,
+            companyId: activeCompanyId,
             employeeId: rec.employeeId
           }
         }
@@ -190,7 +209,7 @@ export const handleCDataPost = async (req, res) => {
       if (!employee) {
         employee = await prisma.employee.create({
           data: {
-            companyId: device.companyId,
+            companyId: activeCompanyId,
             employeeId: rec.employeeId,
             name: `Employee #${rec.employeeId}`,
             department: 'Operations',
@@ -203,7 +222,7 @@ export const handleCDataPost = async (req, res) => {
       // Save AttendanceLog record isolated by companyId
       await prisma.attendanceLog.create({
         data: {
-          companyId: device.companyId,
+          companyId: activeCompanyId,
           employeeId: rec.employeeId,
           deviceSerial: serialNumber,
           deviceId: device.id,
@@ -218,7 +237,7 @@ export const handleCDataPost = async (req, res) => {
       savedCount++;
     }
 
-    console.log(`✅ [ADMS Success] Successfully stored ${savedCount} attendance logs for Company [${device.company?.name}].`);
+    console.log(`✅ [ADMS Success] Successfully stored ${savedCount} new attendance logs for Company [${device.company?.name || defaultCompany.name}].`);
 
     // Standard BioMax & eSSL response format: "OK: <count>" or "OK"
     res.set('Content-Type', 'text/plain');

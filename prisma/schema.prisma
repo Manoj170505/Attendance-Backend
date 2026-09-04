@@ -77,6 +77,7 @@ model AttendanceLog {
   rawData        String?         // Full original raw ADMS payload line for audit trail
   createdAt      DateTime        @default(now())
 
+  @@unique([companyId, deviceSerial, employeeId, timestamp])
   @@index([companyId, timestamp])
   @@index([companyId, employeeId])
   @@index([deviceSerial])

@@ -6,12 +6,13 @@ const net = require('net');
 const os = require('os');
 
 // ================================================================
-// DEFENSIVE MONKEY-PATCH FOR NODE-ZKLIB (Fixes null subarray crash)
+// DEFENSIVE MONKEY-PATCH FOR NODE-ZKLIB & STATE DECODER
 // ================================================================
 try {
   const ZKLibTCP = require('node-zklib/zklibtcp');
   const { createTCPHeader, decodeTCPHeader, checkNotEventTCP } = require('node-zklib/utils');
-  const { COMMANDS, MAX_CHUNK } = require('node-zklib/constants');
+  const { COMMANDS, MAX_CHUNK, REQUEST_DATA } = require('node-zklib/constants');
+  const { parseTimeToDate } = require('node-zklib/utils');
 
   ZKLibTCP.prototype.readWithBuffer = function (reqData, cb) {
     var self = this;
@@ -103,15 +104,12 @@ try {
         });
     });
   };
-  const { REQUEST_DATA } = require('node-zklib/constants');
-  const { parseTimeToDate } = require('node-zklib/utils');
 
   function customDecodeRecordData40(recordData) {
     const b26 = recordData.length > 26 ? recordData.readUInt8(26) : 1;
     const b30 = recordData.length > 30 ? recordData.readUInt8(30) : 0;
     const b31 = recordData.length > 31 ? recordData.readUInt8(31) : 0;
-    
-    // In ZK/BioMax firmware: state code (1=Out, 2=Break Out, etc.) can be at offset 31 or 30
+
     let detectedState = 0;
     if (b31 >= 1 && b31 <= 5) {
       detectedState = b31;
@@ -119,33 +117,11 @@ try {
       detectedState = b30;
     }
 
-    // Robust timestamp decoding: supports both standard ZK formula and modern TFT bitfield encodings
-    let parsedDate = null;
-    try {
-      const rawTimeInt = recordData.readUInt32LE(27);
-      if (rawTimeInt > 0) {
-        if (typeof parseTimeToDate === 'function') {
-          parsedDate = parseTimeToDate(rawTimeInt);
-        }
-        if (!parsedDate || isNaN(parsedDate.getTime()) || parsedDate.getFullYear() < 2015 || parsedDate.getFullYear() > 2035) {
-          const second = rawTimeInt & 0x3F;
-          const minute = (rawTimeInt >> 6) & 0x3F;
-          const hour = (rawTimeInt >> 12) & 0x1F;
-          const day = (rawTimeInt >> 17) & 0x1F;
-          const month = Math.max(0, Math.min(11, ((rawTimeInt >> 22) & 0x0F) - 1));
-          const year = ((rawTimeInt >> 26) & 0x3F) + 2000;
-          parsedDate = new Date(year, month, day, hour, minute, second);
-        }
-      }
-    } catch (e) {
-      parsedDate = null;
-    }
-
     return {
       userSn: recordData.readUIntLE(0, 2),
       deviceUserId: recordData.slice(2, 26).toString('ascii').split('\0').shift().trim(),
       verifyType: b26,
-      recordTime: (parsedDate && !isNaN(parsedDate.getTime())) ? parsedDate : null,
+      recordTime: parseTimeToDate ? parseTimeToDate(recordData.readUInt32LE(27)) : new Date(),
       recordType: detectedState,
       status: detectedState,
       state: detectedState,
@@ -211,13 +187,20 @@ function saveConfig() {
   }
 }
 
-// Load Cache of Synced Punches to prevent duplicate submissions
+// Load Cache of Synced Punches and Cursor Tracking
 let syncedCache = new Set();
+let latestSyncedTimestamp = 0;
+
 if (fs.existsSync(CACHE_PATH)) {
   try {
     const raw = fs.readFileSync(CACHE_PATH, 'utf8');
-    const arr = JSON.parse(raw);
-    syncedCache = new Set(arr);
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      syncedCache = new Set(parsed);
+    } else if (parsed && typeof parsed === 'object') {
+      syncedCache = new Set(parsed.keys || []);
+      latestSyncedTimestamp = Number(parsed.latestTimestamp || 0);
+    }
   } catch (err) {
     syncedCache = new Set();
   }
@@ -225,8 +208,11 @@ if (fs.existsSync(CACHE_PATH)) {
 
 function saveCache() {
   try {
-    const arr = Array.from(syncedCache).slice(-5000);
-    fs.writeFileSync(CACHE_PATH, JSON.stringify(arr, null, 2));
+    const data = {
+      latestTimestamp: latestSyncedTimestamp,
+      keys: Array.from(syncedCache).slice(-10000)
+    };
+    fs.writeFileSync(CACHE_PATH, JSON.stringify(data, null, 2));
   } catch (err) {
     console.error('⚠️ Error saving synced cache:', err.message);
   }
@@ -294,21 +280,17 @@ async function discoverDeviceIp() {
     }
   }
 
-  // Also include standard 192.168.137, 192.168.1, 192.168.0 subnets
   candidatePrefixes.add('192.168.137');
   candidatePrefixes.add('192.168.1');
   candidatePrefixes.add('192.168.0');
 
   for (const prefix of candidatePrefixes) {
-    // Scan common host ranges (1 to 254) in parallel batches
     const batchSize = 35;
     for (let start = 1; start <= 254; start += batchSize) {
       const promises = [];
       for (let i = start; i < Math.min(start + batchSize, 255); i++) {
         const ip = `${prefix}.${i}`;
-        promises.push(
-          testPort(ip, config.devicePort).then((isOpen) => (isOpen ? ip : null))
-        );
+        promises.push(testPort(ip, config.devicePort).then((isOpen) => (isOpen ? ip : null)));
       }
       const results = await Promise.all(promises);
       const foundIp = results.find((ip) => ip !== null);
@@ -321,11 +303,31 @@ async function discoverDeviceIp() {
   return null;
 }
 
+// Fetch the latest timestamp recorded in cloud to avoid fetching old history
+async function initHighWaterMark() {
+  try {
+    const res = await axios.get(`${config.cloudApiUrl.replace(/\/$/, '')}/api/attendance/latest-timestamp?deviceSerial=${config.deviceSerial}`, {
+      timeout: 8000
+    });
+    if (res.data && res.data.latestTimestamp) {
+      const serverTime = new Date(res.data.latestTimestamp).getTime();
+      if (serverTime > latestSyncedTimestamp) {
+        latestSyncedTimestamp = serverTime;
+        console.log(`📍 [HIGH-WATER MARK] Resuming sync from: ${new Date(latestSyncedTimestamp).toLocaleString()}`);
+      }
+    }
+  } catch (err) {
+    console.log(`ℹ️ [CURSOR SYNC] Starting fresh sync cursor.`);
+  }
+}
+
 // Function to send a punch to Railway Cloud REST API
 async function pushPunchToCloud(record) {
   try {
     const employeeId = String(record.deviceUserId || record.userId || record.pin || record.user_sn || record.uid);
     const punchTime = record.recordTime || record.timestamp || record.time || new Date();
+    const punchTimeMs = new Date(punchTime).getTime();
+
     const rawState = record.recordType !== undefined ? record.recordType : (record.status !== undefined ? record.status : (record.state !== undefined ? record.state : 0));
     const stateCode = String(rawState);
 
@@ -363,6 +365,12 @@ async function pushPunchToCloud(record) {
     });
 
     if (response.data && response.data.success) {
+      if (punchTimeMs > latestSyncedTimestamp) {
+        latestSyncedTimestamp = punchTimeMs;
+      }
+      if (response.data.isDuplicate) {
+        return true; // Already registered
+      }
       console.log(`✅ [SYNCED TO CLOUD] Employee PIN: ${employeeId} | ${new Date(punchTime).toLocaleTimeString()} | State: ${payload.state} | Type: ${payload.punchType}`);
       return true;
     }
@@ -424,7 +432,7 @@ async function sendHeartbeat() {
   }
 }
 
-// Sync Loop
+// Incremental Sync Loop: Only processes new entries
 async function pollAttendanceLogs() {
   if (isPolling || !isConnected || !zk) return;
   isPolling = true;
@@ -439,20 +447,31 @@ async function pollAttendanceLogs() {
       let newPunches = 0;
 
       for (const log of logs.data) {
-        const uniqueKey = `${config.deviceSerial}_${log.deviceUserId}_${new Date(log.recordTime).getTime()}`;
+        const punchTimeMs = new Date(log.recordTime).getTime();
+        const uniqueKey = `${config.deviceSerial}_${log.deviceUserId}_${punchTimeMs}`;
 
-        if (!syncedCache.has(uniqueKey)) {
-          const success = await pushPunchToCloud(log);
-          if (success) {
-            syncedCache.add(uniqueKey);
-            newPunches++;
-          }
+        // 1. Skip if already in local cache
+        if (syncedCache.has(uniqueKey)) {
+          continue;
+        }
+
+        // 2. Skip if older than our high-water mark timestamp
+        if (latestSyncedTimestamp > 0 && punchTimeMs < latestSyncedTimestamp) {
+          syncedCache.add(uniqueKey);
+          continue;
+        }
+
+        // 3. New entry: push to cloud
+        const success = await pushPunchToCloud(log);
+        if (success) {
+          syncedCache.add(uniqueKey);
+          newPunches++;
         }
       }
 
       if (newPunches > 0) {
         saveCache();
-        console.log(`✨ [BATCH COMPLETE] Synced ${newPunches} new biometric punch(es) to cloud dashboard.\n`);
+        console.log(`✨ [LIVE PUNCH SYNC] Successfully registered ${newPunches} new biometric punch(es).\n`);
       }
     }
   } catch (err) {
@@ -477,6 +496,7 @@ async function connectToDevice() {
         console.log(`🟢 [CONNECTED TO DEVICE] Ready to capture live attendance punches!\n`);
 
         await sendHeartbeat();
+        await initHighWaterMark();
         await syncUsersFromDevice();
         lastUserSyncTime = Date.now();
       } catch (err) {
