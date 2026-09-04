@@ -119,11 +119,33 @@ try {
       detectedState = b30;
     }
 
+    // Robust timestamp decoding: supports both standard ZK formula and modern TFT bitfield encodings
+    let parsedDate = null;
+    try {
+      const rawTimeInt = recordData.readUInt32LE(27);
+      if (rawTimeInt > 0) {
+        if (typeof parseTimeToDate === 'function') {
+          parsedDate = parseTimeToDate(rawTimeInt);
+        }
+        if (!parsedDate || isNaN(parsedDate.getTime()) || parsedDate.getFullYear() < 2015 || parsedDate.getFullYear() > 2035) {
+          const second = rawTimeInt & 0x3F;
+          const minute = (rawTimeInt >> 6) & 0x3F;
+          const hour = (rawTimeInt >> 12) & 0x1F;
+          const day = (rawTimeInt >> 17) & 0x1F;
+          const month = Math.max(0, Math.min(11, ((rawTimeInt >> 22) & 0x0F) - 1));
+          const year = ((rawTimeInt >> 26) & 0x3F) + 2000;
+          parsedDate = new Date(year, month, day, hour, minute, second);
+        }
+      }
+    } catch (e) {
+      parsedDate = null;
+    }
+
     return {
       userSn: recordData.readUIntLE(0, 2),
       deviceUserId: recordData.slice(2, 26).toString('ascii').split('\0').shift().trim(),
       verifyType: b26,
-      recordTime: parseTimeToDate ? parseTimeToDate(recordData.readUInt32LE(27)) : new Date(),
+      recordTime: (parsedDate && !isNaN(parsedDate.getTime())) ? parsedDate : null,
       recordType: detectedState,
       status: detectedState,
       state: detectedState,
